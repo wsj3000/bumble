@@ -26,12 +26,12 @@ import json
 import struct
 import sys
 import logging
+import os
 from typing import Optional
 
-# Configure logging
+# Configure logging from environment variable
 logging.basicConfig(
-    level=logging.DEBUG,
-    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s'
+    level=os.environ.get('BUMBLE_LOGLEVEL', 'DEBUG').upper()
 )
 logger = logging.getLogger(__name__)
 
@@ -419,6 +419,25 @@ class BLEHIDDevice:
         """Get remote device address"""
         conn = self.connection
         return conn.peer_address if conn else None
+    
+    async def cleanup(self):
+        """Clean up and disconnect all connections"""
+        if not self.connections:
+            logger.info("No active connections to clean up")
+            return
+            
+        logger.info("Cleaning up connections...")
+        for conn in list(self.connections):
+            try:
+                # Add timeout for disconnect operation
+                await asyncio.wait_for(conn.disconnect(), timeout=2.0)
+                logger.info(f"✓ Disconnected from {conn.peer_address}")
+            except asyncio.TimeoutError:
+                logger.warning(f"⚠ Disconnect timeout for {conn.peer_address} (connection may already be closed)")
+            except Exception as e:
+                logger.warning(f"⚠ Error disconnecting {conn.peer_address}: {e}")
+        self.connections.clear()
+        logger.info("✓ All connections cleaned up")
 
 
 # -----------------------------------------------------------------------------
@@ -627,6 +646,9 @@ async def main():
     logger.info("BLE HID Device Starting...")
     logger.info("="*70)
     
+    hid_device = None
+    device = None
+    
     try:
         # Open transport
         logger.info(f"Opening transport: {transport_spec}")
@@ -656,25 +678,72 @@ async def main():
             # Run selected mode
             logger.info(f"Starting mode: {command}")
             
-            if command == 'test-mode':
-                await test_mode(device, hid_device)
-            else:  # default to web mode
-                await keyboard_device(hid_device)
+            try:
+                if command == 'test-mode':
+                    await test_mode(device, hid_device)
+                else:  # default to web mode
+                    await keyboard_device(hid_device)
+            except KeyboardInterrupt:
+                logger.info("\n⚠ Keyboard interrupt received")
+                raise
                 
     except FileNotFoundError:
         logger.error(f"❌ Config file not found: {config_file}")
         logger.error("Create a config file or use an example from bumble/examples")
+    except KeyboardInterrupt:
+        logger.info("\n✓ Shutdown requested")
     except Exception as e:
         logger.error(f"❌ Error: {e}", exc_info=True)
         raise
+    finally:
+        # Clean up connections
+        if hid_device:
+            try:
+                await asyncio.wait_for(hid_device.cleanup(), timeout=5.0)
+            except asyncio.TimeoutError:
+                logger.warning("⚠ Cleanup timeout - forcing shutdown")
+            except Exception as e:
+                logger.warning(f"⚠ Error during cleanup: {e}")
+        
+        # Stop advertising
+        if device:
+            try:
+                await asyncio.wait_for(device.stop_advertising(), timeout=2.0)
+                logger.info("✓ Stopped advertising")
+            except asyncio.TimeoutError:
+                logger.warning("⚠ Stop advertising timeout - continuing shutdown")
+            except Exception as e:
+                logger.warning(f"⚠ Error stopping advertising: {e}")
+        
+        logger.info("✓ Shutdown complete")
 
 
 # -----------------------------------------------------------------------------
 # Entry Point
 # -----------------------------------------------------------------------------
 if __name__ == '__main__':
+    import signal
+    
+    # Flag to track if we should do graceful shutdown
+    graceful_shutdown = True
+    
+    def signal_handler(sig, frame):
+        """Handle Ctrl+C with fast exit option"""
+        global graceful_shutdown
+        if graceful_shutdown:
+            logger.info("\n⚠ Interrupt received - shutting down gracefully...")
+            logger.info("   (Press Ctrl+C again for immediate exit)")
+            graceful_shutdown = False
+        else:
+            logger.info("\n⚠ Force exit!")
+            sys.exit(1)
+    
+    # Register signal handler
+    signal.signal(signal.SIGINT, signal_handler)
+    
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logger.info("\n✓ Shutdown requested")
+        if graceful_shutdown:
+            logger.info("\n✓ Graceful shutdown completed")
         sys.exit(0)
