@@ -1,0 +1,13 @@
+{
+  "name": "BLE HID Keyboard",
+  "address": "F0:F1:F2:F3:F4:F5",
+  "address_type": "random",
+  "appearance": 961,
+  "le": {
+    "enabled": true,
+    "advertising": {
+      "interval_min": 160,
+      "interval_max": 320
+    }
+  }
+}
